@@ -1,0 +1,790 @@
+;license:MIT
+;(c) 2022 by Tom Charlesworth
+;
+; phasor-test:
+; . (to do)
+;
+
+; ACME 0.97
+;
+!cpu 6502	; Compatible with all Apple2's
+!to "phasor-test", plain
+!sl "phasor-test.labels"
+*=$2000
+
+;------------------------------------------------------------------------------
+
+!source "AppleDefs.a"
+!source "MockingboardDefs.a"
+
+;------------------------------------------------------------------------------
+
+ZP_BASE = $f0
+
+MBTimer = $f4
+MBTimerL = MBTimer
+MBTimerH = MBTimer+1
+MBBase2 = $f6		; alias with SSI263Base
+MBBase2L = MBBase2
+MBBase2H = MBBase2+1
+SSI263Base = $f6
+SSI263BaseL = SSI263Base
+SSI263BaseH = SSI263Base+1
+zpTmp6 = $f8
+zpTmp5 = $f9
+SpeechData = $f8
+SpeechDataL = SpeechData
+SpeechDataH = SpeechData+1
+zpTmp4 = $fa
+zpTmp3 = $fb
+zpTmpPtr = $fa
+zpTmpPtrL = zpTmpPtr
+zpTmpPtrH = zpTmpPtr+1
+zpTmp2 = $fc
+zpTmp1 = $fd
+String = $fc		; alias with zpTmp2 & zpTmp1
+StringL = String
+StringH = String+1
+MBBase = $fe		; Mockingboard base
+MBBaseL = MBBase
+MBBaseH = MBBase+1
+
+;------------------------------------------------------------------------------
+
+!zone code
+
+entrypoint
+; Pre: TODO: disable accelerators or set to 1MHz
+;
+
+	sei
+
+	ldx		#($ff-ZP_BASE)
+-		lda		ZP_BASE,x
+		sta		saveZP,x
+		dex
+		bpl		-
+
+	ldx		#2
+-		lda		NMI,x
+		sta		saveNMI,x
+		dex
+		bpl		-
+
+	lda		IRQL
+	sta		saveIRQL
+	lda		IRQH
+	sta		saveIRQH
+
+	lda		SOFTEV_L
+	sta		saveRESETL
+	lda		SOFTEV_H
+	sta		saveRESETH
+	lda		PWREDUP
+	sta		savePWREDUP
+
+	;
+
+!cpu 65816
+	sed
+	lda		#$99
+	clc
+	adc		#$01
+	cld
+	bmi		@3
+		lda		#1
+		clc
+		xce		; 65C02:NOP / 65816:exchange carry and emulation flags
+		bcc		@1
+			xce
+			sta		is65816
+			bra		@2
+@1	sta		is65C02
+@2	sta		is65C02or65816
+@3
+!cpu 6502
+
+	lda		VERSION
+	cmp		#VERSION_IIE_OR_HIGHER
+	bne		+
+		lda		#1
+		sta		hasLowerCase
++
+
+	jsr		isIIc
+	bne		+
+		; //c only: Enable MB4c (and disable mouse firmware). (mb-audit/GH#8)
+		lda		#$ff
+		sta		$C403		; SY6522_DDRA
+		sta		$C404		; SY6522_TIMER1L_COUNTER - just writes to T1_LATCH(low)
++
+
+	lda		TEXTON
+	lda		MIXEDOFF
+	lda		PAGE2OFF
+	lda		HIRESOFF
+	jsr		HOME	; perhaps better to clear to $00? ie. for floating-bus reads in GetSlotInfo()
+
+	jsr		GetSlotInfo
+	bne		+
+		lda		#<msg_NoMB
+		ldx		#>msg_NoMB
+		jsr		Print
+		jmp		exit
+
++	lda		#<msg_mbaudit
+	ldx		#>msg_mbaudit
+	jsr		Print
+	jsr		Display
+
+	lda		#<msg_cpu6502Detected
+	ldx		#>msg_cpu6502Detected
+	ldy		is65C02or65816
+	beq		+
+		lda		#<msg_cpu65C02Detected
+		ldx		#>msg_cpu65C02Detected
+		ldy		is65816
+		beq		+
+			lda		#<msg_cpu65816Detected
+			ldx		#>msg_cpu65816Detected
++	jsr		Print
+
+	lda		#0
+	sta		totalTests+0
+	sta		totalTests+1
+
+	lda		#7
+	sta		slotUnderTest
+@nextSlot
+		ldx		slotUnderTest
+		lda		slotInfo,x
+		beq		+
+			and		#3
+			sta		has6522
+			jsr		Check6522		; Basic 6522 checks
+			bcc		++
+				jsr		PrintTestFailedErrBytes
+				jmp		exit
+++			jsr		DetectSubunits	; Phasor card
+			ldx		slotUnderTest
+			jsr		DisplayCardUpdate
+			;
+			jsr		Test6522
+			bcc		++
+@error			jsr		PrintTestFailedErrBytes
+				jmp		exit
+++
+			;
++		dec		slotUnderTest
+		bne		@nextSlot
+
+	;
+
+	lda		#<msg_OK
+	ldx		#>msg_OK
+	jsr		Print
+	ldy		totalTests+1
+	ldx		totalTests+0
+	jsr		PRNTYX
+	lda		#$80+')'
+	jsr		COUT
+	lda		#$80+$0d
+	jsr		COUT
+
+	;
+
+exit
+
+	lda		saveRESETL
+	sta		SOFTEV_L
+	lda		saveRESETH
+	sta		SOFTEV_H
+	lda		savePWREDUP
+	sta		PWREDUP
+
+	lda		saveIRQL
+	sta		IRQL
+	lda		saveIRQH
+	sta		IRQH
+
+	ldx		#2
+-		lda		saveNMI,x
+		sta		NMI,x
+		dex
+		bpl		-
+
+	ldx		#($ff-ZP_BASE)
+-		lda		saveZP,x
+		sta		ZP_BASE,x
+		dex
+		bpl		-
+
+	rts
+
+;------------------------------------------------------------------------------
+
+GetSlotInfo
+; Scan all slots for 6522s at $Cn00 and $Cn80
+; Post: Z=1 (BEQ) if nothing found
+
+	lda		#0
+	sta		numMockingboards
+
+	ldx		#7
+-		lda		#0
+		sta		slotInfo,x
+		jsr		Detect6522
+		lda		slotInfo,x
+		beq		+
+			inc		numMockingboards
++		dex
+		bne		-
+
+	lda		numMockingboards
+	rts
+
+;------------------------------------------------------------------------------
+
+SetMBBase
+; Pre: X=slot#
+; Post: X=slot#
+
+	txa
+	ora		#$c0
+	sta		MBBaseH
+	lda		#0
+	sta		MBBaseL
+	rts
+
+;------------------------------------------------------------------------------
+
+DetectSubunits
+; Detect Phasor card
+; Pre: zpTmp1 = slotInfo[slot]
+
+	lda		#0
+	sta		isPhasorCard			; assume Mockingboard
+
+	lda		#PH_MOCKINGBOARD
+	sta		phasorMode
+
+	; Determine if this is a Mockingboard or Phasor card
+
+	lda		zpTmp1
+	and		#3
+	cmp		#3
+	bne		@donePhasor
+
+	lda		#$55
+	ldy		#SY6522_DDRB
+	sta		(MBBase),y
+	asl								; A=$AA
+	iny								; SY6522_DDRA
+	sta		(MBBase),y
+
+	lda		#PH_PHASOR
+	jsr		SetPhasorMode
+
+	; Phasor card in Phasor mode has floating-bus at $Cn00-$Cn0F
+	ldy		#SY6522_DDRB
+	lda		#$55
+	cmp		(MBBase),y
+	bne		+
+	asl								; A=$AA
+	iny								; SY6522_DDRA
+	cmp		(MBBase),y
+	bne		+
+	ldy		#SY6522_TIMER2L_COUNTER
+	jsr		SF_GetTimerL
+	beq		++
++		inc		isPhasorCard
+++	lda		#PH_MOCKINGBOARD
+	jsr		SetPhasorMode
+
+@donePhasor
+
+	rts
+
+;------------------------------------------------------------------------------
+
+SetPhasorMode
+; Pre: A=phasorMode
+
+	sta		phasorMode
+	lda		MBBaseH
+	asl
+	asl
+	asl
+	asl								; slot * 16
+	clc
+	adc		phasorMode
+	tax
+	lda		$c080,x
+	rts
+
+;------------------------------------------------------------------------------
+
+NMI_Handler
+; Provide a wrapper for NMI, since there's no Apple II ROM support, other than vectoring to $3FA:
+; . NMI asserted -> PUSH PC,P; PC=($FFFA)=$3FA -> JMP Check6522ISR_NMI (so doesn't execute the Apple II ROM)
+; 6502's NMI is triggered on NMI(active low) falling edge (H->L).
+; Interrupt source will be cleared by ISR.
+
+	pha
+
+	inc		isrNMIcount
+
+	; setup for ISR's RTI
+	lda		#>NmiReturn
+	pha
+	lda		#<NmiReturn
+	pha
+	php
+
+NmiVector
+	jmp		$0000					; this is the regular ISR for IRQ
+
+NmiReturn
+	pla
+	rti
+
+;------------------------------------------------------------------------------
+
+SetIrqNmiVectors
+; Pre: A(l),X(h) = ISR
+
+	jsr		SetIrqVector
+
+	; fall through...
+
+;SetNmiVector
+; Pre: A(l),X(h) = ISR
+
+	sta		NmiVector+1
+	stx		NmiVector+2
+
+	lda		#$4C
+	sta		NMI+0
+	lda		#<NMI_Handler
+	sta		NMI+1
+	lda		#>NMI_Handler
+	sta		NMI+2
+	rts
+
+SetIrqVector
+; Pre: A(l),X(h) = ISR
+
+	sta		IRQL
+	stx		IRQH
+	rts
+
+;------------------------------------------------------------------------------
+
+resetSubTestMinus1
+	lda		#$ff
+	bne		+
+
+resetSubTest
+	lda		#0
++	sta		subTestNum
+	rts
+
+;------------------------------------------------------------------------------
+
+incSubTestBy1				; NB. Don't inc totalTests
+; Post: Z=1
+	inc		subTestNum
+	lda		#0
+	rts
+
+;
+
+incSubTestNum
+
+	inc		subTestNum
+	; fall through...
+
+incTotalTests
+
+	inc		totalTests+0
+	bne		+
+	inc		totalTests+1
++	rts
+
+;------------------------------------------------------------------------------
+
+@myWAIT_prealign
+!align 255, 0, $EA		; align to 256 bytes (pad with $EA's)
+!warn "myWAIT padding = ", * - @myWAIT_prealign
+
+; Copy of the II ROM's WAIT routine.
+;
+; WAIT on a IIgs is not cycle accurate, since the WAIT description says it waits a minimum number of microseconds.
+; The IIgs ROM has extra code to ensure the CPU is running at slow speed, and this adds extra time.
+
+myWAIT
+	sec
+.x0
+-	pha
+.x1
+--		sbc		#1
+		bne		--
+!if >.x1 != >* {
+      !serious "branch crosses a page"
+}
+	pla
+	sbc		#1
+	bne		-
+!if >.x0 != >* {
+      !serious "branch crosses a page"
+}
+	rts
+
+;------------------------------------------------------------------------------
+
+isIIc
+; Post: Z=1 if //c
+
+	lda		VERSION
+	cmp		#VERSION_IIE_OR_HIGHER
+	bne		+
+
+	lda		VERSION3
+	cmp		VERSION3_IIC
++	rts
+
+;------------------------------------------------------------------------------
+
+TEXTLINE0=$400
+TEXTLINE1=$480
+TEXTLINE2=$500
+TEXTLINE3=$580
+TEXTLINE4=$600
+TEXTLINE5=$680
+
+LINE1=TEXTLINE2
+LINE2=TEXTLINE3
+LINE3=TEXTLINE4
+LINE4=TEXTLINE5
+SLOT1POS = $13					; pos left of '1'
+
+Display
+;               1  2  3  4  5  6  7
+;          $00: ?           C  P       ; ?=6522(VIA), C=MB-C(or MB-A or Sound-II), P=Phasor
+;          $80:    ?        C  P
+
+	lda		#$80+'$'
+	sta		LINE2+$0f
+	sta		LINE3+$0f
+	lda		#$80+'0'
+	sta		LINE2+$10
+	sta		LINE2+$11
+	sta		LINE3+$11
+	lda		#$80+'8'
+	sta		LINE3+$10
+	lda		#$80+':'
+	sta		LINE2+$12
+	sta		LINE3+$12
+
+	ldx		#7*3-1
+	ldy		#7
+
+-		tya
+		ora		#$B0
+		sta		LINE1+$12,x		; '1  2  3  4  5  6  7'
+
+		lda		slotInfo,y
+		lsr
+		pha
+		lda		#$80+' '		; C-flag not affected
+		bcc		+
+		lda		#$80+'?'
++		sta		LINE2+$12,x		; 'V' or ' '
+
+		pla
+		lsr
+		lda		#$80+' '		; C-flag not affected
+		bcc		+
+		lda		#$80+'?'
++		sta		LINE3+$12,x		; 'V' or ' '
+
+		dex
+		dex
+		dex
+		dey
+		bne		-
+
+	lda		#$80+$0a
+	jsr		COUT
+	lda		#$80+$0a
+	jsr		COUT
+	lda		#$80+$0a
+	jsr		COUT
+	lda		#$80+$0a
+	jsr		COUT
+	lda		#$80+$0a
+	jsr		COUT
+
+	rts
+
+;--------------------------------------
+
+DisplayCardUpdate
+; Pre: X=slot#
+
+	;
+	; Update cards
+	;
+
+	; x = (x-1)*3 + 1 = the position of the slot# (eg. '1')
+	dex
+	stx		zpTmp1
+	txa
+	asl
+	sec							; sec to do the +1
+	adc		zpTmp1
+	tax
+
+	lda		#$80+' '
+	sta		zpTmp1			; x-1 pos: default: ' '
+	sta		zpTmp2			; x+1 pos: default: ' '
+
+		lda		isPhasorCard
+		beq		@isIIorC
+			lda		#$80+'P'
+			bne		@out
+@isIIorC	lda		#$80+'C'	; MB-C or MB-Sound II (has 2x 6522/AY8913, but no SC01 nor SSI263)
+@out:
+		sta		LINE2+SLOT1POS,x
+		sta		LINE3+SLOT1POS,x
+		lda		zpTmp1
+		sta		LINE2+SLOT1POS-1,x
+		sta		LINE3+SLOT1POS-1,x
+		lda		zpTmp2
+		sta		LINE2+SLOT1POS+1,x
+		sta		LINE3+SLOT1POS+1,x
+
+	rts
+
+;------------------------------------------------------------------------------
+
+PrintTestFailed		; No error bytes
+	jsr		PrintLineTestFailed
+	; (next line)
+	jmp		PrintLineTestNum
+
+	;
+
+PrintTestFailedErrBytes
+	jsr		PrintLineTestFailed
+	; (next line)
+	jsr		PrintLineTestNum
+	; (next line)
+	lda		#<msg_Expected
+	ldx		#>msg_Expected
+	jsr		Print
+	ldx		errorExpected
+	jsr		PRNTX
+	lda		#<msg_Actual
+	ldx		#>msg_Actual
+	jsr		Print
+	ldx		errorActual
+	jsr		PRNTX
+	lda		#$80+$0d
+	jmp		COUT
+
+	;
+
+PrintLineTestFailed
+	jsr		PrintSlotNum
+
+	lda		#<msg_TestFailed
+	ldx		#>msg_TestFailed
+	jsr		Print
+
+	lda		testComponentNum
+	lsr
+	lsr
+	lsr
+	lsr
+	tax
+	dex
+	beq		@1		; 1
+	lda		#<msg_componentCard
+	ldx		#>msg_componentCard
+	bne		+
+@1	lda		#<msg_component6522
+	ldx		#>msg_component6522
+	bne		+
++	jsr		Print
+;	lda		#$80+$0d		; exactly 40 char, so no need for CR
+;	jsr		COUT
+	rts
+
+	;
+
+PrintLineTestNum
+	lda		#<msg_testNum
+	ldx		#>msg_testNum
+	jsr		Print
+	ldx		testComponentNum
+	jsr		PRNTX
+	lda		#$80+':'
+	jsr		COUT
+	ldx		testNum
+	jsr		PRNTX
+	lda		#$80+':'
+	jsr		COUT
+	ldx		subTestNum
+	jsr		PRNTX
+	lda		#$80+$0d
+	jmp		COUT
+
+
+PrintSlotNum
+	lda		#<msg_Slot
+	ldx		#>msg_Slot
+	jsr		Print
+	lda		slotUnderTest
+	ora		#$80+$30
+	jsr		COUT
+	lda		#$80+' '
+	jsr		COUT
+	lda		#$80+':'
+	jmp		COUT
+
+;------------------------------------------------------------------------------
+
+Print
+; Pre: A(l),X(h) = msg addr
+
+	sta		StringL
+	stx		StringH
+	ldy		#0
+@loop	lda		(String),y
+		beq		+
+		ldx		hasLowerCase
+		bne		++
+			cmp		#'a'
+			bcc		++
+			cmp		#'z'+1
+			bcs		++
+			and		#!($20)
+++
+		ora		#$80	; set high bit
+		tax
+		tya
+		pha
+		txa
+		jsr		COUT
+		pla
+		tay
+		iny
+		bne 	@loop
++	rts
+
+;------------------------------------------------------------------------------
+
+COMPONENT_CARD		= $00
+COMPONENT_6522		= $10
+
+!source "chip-6522.a"
+
+;------------------------------------------------------------------------------
+
+!zone data
+
+!align 15, 0, 0		; align to 16 bytes (pad with 0's)
+
+saveZP			!fill ($100-ZP_BASE),0
+
+; slotInfo bitfield:
+							;   b7..4: AY bitmap
+NMI_FOR_6522B	= %00001000	;   b3:    NMI for 6522 at $80
+NMI_FOR_6522A	= %00000100	;   b2:    NMI for 6522 at $00
+HAS_6522B		= %00000010	;   b1:    6522 at $80
+HAS_6522A		= %00000001	;   b0:    6522 at $00
+slotInfo		!fill 8,0	; slot[0..7]
+
+numMockingboards	!byte 0
+
+is65C02			!byte 0
+is65816			!byte 0
+is65C02or65816	!byte 0
+
+slotUnderTest	!byte 0
+
+testComponentNum	!byte COMPONENT_CARD
+testNum			!byte 0
+subTestNum		!byte 0
+totalTests		!byte 0,0
+
+isPhasorCard	!byte 0
+phasorMode		!byte PH_MOCKINGBOARD
+
+has6522			!byte 0
+hasLowerCase	!byte 0
+
+isrIFR_A		!byte 0
+isrIFR_B		!byte 0
+isrIFR			!byte 0
+isrFlag			!byte 0
+isrCount		!byte 0
+isrError		!byte 0,0
+isrCopyA		!byte 0
+
+isrNMIcount		!byte 0
+isrNMIcount_A	!byte 0
+isrNMIcount_B	!byte 0
+
+saveZPTextVars	!fill (BAS2H-CH)+1,0
+
+saveIRQL		!byte 0
+saveIRQH		!byte 0
+saveNMI			!byte 0,0,0
+
+saveRESETL		!byte 0
+saveRESETH		!byte 0
+savePWREDUP		!byte 0
+
+errorExpected	!byte 0
+errorActual		!byte 0
+
+hasBeenReset	!byte 0
+userlandSP		!byte 0
+
+msg_mbaudit	!text "phasor-1 v0.1, Tom Charlesworth, 2021,22",0xd
+msg_mbauditEnd !text 0
+
+msg_cpu6502Detected !text "6502 detected",0xd
+msg_cpu6502DetectedEnd !text 0
+msg_cpu65C02Detected !text "65C02 detected",0xd
+msg_cpu65C02DetectedEnd !text 0
+msg_cpu65816Detected !text "65816 detected",0xd
+msg_cpu65816DetectedEnd !text 0
+
+msg_NoMB !text "No Mockingboard detected!",0xd
+msg_NoMBEnd !text 0
+
+msg_Slot !text "Slot #"	; 0
+msg_SlotEnd !text 0
+
+            ;0123456789
+            ;Slot #? :9012345678901234567890123456789
+msg_TestFailed !text "Mockingboard failed test:"	; [Card|6522|AY8913|SC01|SSI263]
+msg_TestFailedEnd !text 0
+
+; NB. These sub-strings must be exactly 6 chars
+msg_componentCard	!text " Card ",0
+msg_component6522	!text " 6522 ",0
+
+msg_testNum !text "Test: ",0
+
+msg_Expected !text "Expected:"	; 00 (errorExpected)
+msg_ExpectedEnd !text 0
+
+msg_Actual !text " Actual:"	; 00 (errorActual)
+msg_ActualEnd !text 0
+
+msg_OK !text "All tests passed (total=$"	; 0000)
+msg_OKEnd !text 0
