@@ -713,11 +713,11 @@ Test_1
 
 +		clc
 		lda		#1
-		adc		(zpTmpPtr),y
+		adc		(zpTmpPtr),y	; big-endian (lo)
 		sta		(zpTmpPtr),y
 		lda		#0
 		dey
-		adc		(zpTmpPtr),y
+		adc		(zpTmpPtr),y	; big-endian (hi)
 		sta		(zpTmpPtr),y
 
 @next	inc		zpTmp1
