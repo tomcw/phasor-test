@@ -181,16 +181,16 @@ entrypoint
 			ldx		#>msg_FailedCountA
 			jsr		Print
 
-			ldy		test1FailuresA
-			ldx		test1FailuresA+1
+			ldy		test1FailuresA+1
+			ldx		test1FailuresA
 			jsr		PRNTYX
 
 			lda		#<msg_FailedCountB
 			ldx		#>msg_FailedCountB
 			jsr		Print
 
-			ldy		test1FailuresB
-			ldx		test1FailuresB+1
+			ldy		test1FailuresB+1
+			ldx		test1FailuresB
 			jsr		PRNTYX
 
 			lda		#$80+$0d
