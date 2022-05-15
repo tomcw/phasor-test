@@ -639,6 +639,11 @@ Test6522
 TEXTLINE3=$580
 TEXTLINE4=$600
 
+OK_OFFSET_H=0				; NB. big-endian!
+OK_OFFSET_L=1
+NG_OFFSET_H=3				; NB. big-endian!
+NG_OFFSET_L=4
+
 Test_1
 ; Pre:
 ; Post: C=0(OK), C=1(NG)
@@ -706,10 +711,10 @@ Test_1
 		bne		@data_ng
 
 		; data ok
-		ldy		#1
+		ldy		#OK_OFFSET_L
 		bne		+
 @data_ng
-		ldy		#4
+		ldy		#NG_OFFSET_L
 
 +		clc
 		lda		#1
@@ -727,6 +732,16 @@ Test_1
 +		jmp		@loop
 
 @done
+	lda		TEXTLINE3+NG_OFFSET_L
+	sta		test1FailuresA+0	; store as little-endian
+	lda		TEXTLINE3+NG_OFFSET_H
+	sta		test1FailuresA+1
+
+	lda		TEXTLINE4+NG_OFFSET_L
+	sta		test1FailuresB+0	; store as little-endian
+	lda		TEXTLINE4+NG_OFFSET_H
+	sta		test1FailuresB+1
+
 	clc		; C=0(OK)
 	rts
 

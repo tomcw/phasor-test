@@ -175,11 +175,42 @@ entrypoint
 				jmp		exit
 ++
 			;
-+		dec		slotUnderTest
+
+			; Output the two 16-bit failure counts
+			lda		#<msg_FailedCountA
+			ldx		#>msg_FailedCountA
+			jsr		Print
+
+			ldy		test1FailuresA
+			ldx		test1FailuresA+1
+			jsr		PRNTYX
+
+			lda		#<msg_FailedCountB
+			ldx		#>msg_FailedCountB
+			jsr		Print
+
+			ldy		test1FailuresB
+			ldx		test1FailuresB+1
+			jsr		PRNTYX
+
+			lda		#$80+$0d
+			jsr		COUT
+
+			lda		#<msg_PressKeyToContinue
+			ldx		#>msg_PressKeyToContinue
+			jsr		Print
+-				lda		KBD
+				bpl		-
+			lda		KBDSTRB
+
++		; Do next card
+		dec		slotUnderTest
 		bne		@nextSlot
 
 	;
 
+	lda		#$80+$0d
+	jsr		COUT
 	lda		#<msg_OK
 	ldx		#>msg_OK
 	jsr		Print
@@ -753,7 +784,10 @@ errorActual		!byte 0
 hasBeenReset	!byte 0
 userlandSP		!byte 0
 
-msg_mbaudit	!text "phasor-1 v0.1, Tom Charlesworth, 2021,22",0xd
+test1FailuresA	!word 0		; little-endian
+test1FailuresB	!word 0		; little-endian
+
+msg_mbaudit	!text "phasor-1 v0.2, Tom Charlesworth, 2022",0xd
 msg_mbauditEnd !text 0
 
 msg_cpu6502Detected !text "6502 detected",0xd
@@ -788,3 +822,17 @@ msg_ActualEnd !text 0
 
 msg_OK !text "All tests passed (total=$"	; 0000)
 msg_OKEnd !text 0
+
+; 0123456789012345678901234567890123456789
+; 6522 T2H_L failures: $00=nnnn $80=nnnn
+
+msg_FailedCountA !text 0xd,"6522 T2H_L failures: $00="
+msg_FailedCountAEnd !text 0
+
+msg_FailedCountB !text " $80="
+msg_FailedCountBEnd !text 0
+
+;
+
+msg_PressKeyToContinue !text "Press any key to continue",0xd
+msg_PressKeyToContinueEnd !text 0
