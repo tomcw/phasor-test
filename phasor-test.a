@@ -158,7 +158,7 @@ entrypoint
 @nextSlot
 		ldx		slotUnderTest
 		lda		slotInfo,x
-		beq		+
+		beq		@nextCard
 			and		#3
 			sta		has6522
 			jsr		Check6522		; Basic 6522 checks
@@ -174,9 +174,21 @@ entrypoint
 @error			jsr		PrintTestFailedErrBytes
 				jmp		exit
 ++
-			;
 
-			; Output the two 16-bit failure counts
+			; Print the result OK or failure
+
+			lda		test1FailuresA+1
+			ora		test1FailuresA
+			ora		test1FailuresB+1
+			ora		test1FailuresB
+			bne		+
+
+			lda		#<msg_TestedOk
+			ldx		#>msg_TestedOk
+			jsr		Print
+			jmp		++
+
++			; Output the two 16-bit failure counts
 			lda		#<msg_FailedCountA
 			ldx		#>msg_FailedCountA
 			jsr		Print
@@ -193,7 +205,7 @@ entrypoint
 			ldx		test1FailuresB
 			jsr		PRNTYX
 
-			lda		#$80+$0d
+++			lda		#$80+$0d
 			jsr		COUT
 
 			lda		#<msg_PressKeyToContinue
@@ -203,7 +215,7 @@ entrypoint
 				bpl		-
 			lda		KBDSTRB
 
-+		; Do next card
+@nextCard	; Do next card
 		dec		slotUnderTest
 		bne		@nextSlot
 
@@ -831,6 +843,9 @@ msg_FailedCountAEnd !text 0
 
 msg_FailedCountB !text " $80="
 msg_FailedCountBEnd !text 0
+
+msg_TestedOk !text 0xd,"6522 T2H_L tested OK"
+msg_TestedOkEnd !text 0
 
 ;
 
