@@ -838,13 +838,13 @@ msg_OKEnd !text 0
 ; 0123456789012345678901234567890123456789
 ; 6522 T2H_L failures: $00=nnnn $80=nnnn
 
-msg_FailedCountA !text 0xd,"6522 T2H_L failures: $00="
+msg_FailedCountA !text 0xd,"6522 T2C_H failures: $00="
 msg_FailedCountAEnd !text 0
 
 msg_FailedCountB !text " $80="
 msg_FailedCountBEnd !text 0
 
-msg_TestedOk !text 0xd,"6522 T2H_L tested OK"
+msg_TestedOk !text 0xd,"6522 T2C_H tested OK"
 msg_TestedOkEnd !text 0
 
 ;
