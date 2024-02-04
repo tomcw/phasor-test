@@ -161,18 +161,20 @@ entrypoint
 		beq		@nextCard
 			and		#3
 			sta		has6522
+			jsr		DisplaySlotUpdate
+			ldx		slotUnderTest
 			jsr		Check6522		; Basic 6522 checks
 			bcc		++
 				jsr		PrintTestFailedErrBytes
-				jmp		exit
-++			jsr		DetectSubunits	; Phasor card
+				jmp		@waitKey
+++			jsr		DetectSubunits	; ie. AY chips
 			ldx		slotUnderTest
 			jsr		DisplayCardUpdate
 			;
 			jsr		Test6522
 			bcc		++
 @error			jsr		PrintTestFailedErrBytes
-				jmp		exit
+				jmp		@waitKey
 ++
 
 			; Print the result OK or failure
@@ -208,6 +210,7 @@ entrypoint
 ++			lda		#$80+$0d
 			jsr		COUT
 
+@waitKey
 			lda		#<msg_PressKeyToContinue
 			ldx		#>msg_PressKeyToContinue
 			jsr		Print
@@ -217,7 +220,9 @@ entrypoint
 
 @nextCard	; Do next card
 		dec		slotUnderTest
-		bne		@nextSlot
+		beq		+
+		jmp		@nextSlot
++
 
 	;
 
@@ -302,11 +307,18 @@ SetMBBase
 ;------------------------------------------------------------------------------
 
 DetectSubunits
-; Detect Phasor card
+; Detect Phasor card & AY8913
 ; Pre: zpTmp1 = slotInfo[slot]
 
 	lda		#0
+	sta		isSDMusic
+	sta		isMegaAudioCard
+	sta		isMB4C
+	sta		isEchoPlus
 	sta		isPhasorCard			; assume Mockingboard
+	sta		hasSSI263				; ... no SSI263's
+	sta		hasSC01					; ... no SC01
+	sta		hasAY8913				; ... no AY8913's
 
 	lda		#PH_MOCKINGBOARD
 	sta		phasorMode
@@ -314,9 +326,34 @@ DetectSubunits
 	; Determine if this is a Mockingboard or Phasor card
 
 	lda		zpTmp1
-	and		#3
-	cmp		#3
-	bne		@donePhasor
+	and		#HAS_6522B|HAS_6522A
+	cmp		#HAS_6522B|HAS_6522A
+	bne		@doneCardDetection
+
+	; Determine if this is a MegaAudio
+
+	jsr		DetectMegaAudioCard		; Post: Z=1 if no MegaAudio
+	beq		+
+		inc		numMegaAudioCards
+		bne		@doneCardDetection
++
+
+	; Determine if this is a MB4C or Echo+ or SD Music card
+	; NB. if Phasor(Echo+ mode), then don't do the Phasor check - want to preserve the Echo+ mode for user
+
+	jsr		DetectMB4CorEchoPlusorSDM	; Post: Z=1 if no MB4C/EchoPlus/SD Music
+	beq		+
+		; Indicate there's only a 6522 at $Cn80, otherwise some 6522 tests will fail
+		; NB. For Phasor(Echo+ mode), CTRL+RESET will switch back to MB mode, so need to use 6522-B
+		ldx		slotUnderTest
+		lda		#HAS_6522B
+		sta		slotInfo,x
+		sta		has6522
+		sta		zpTmp1
+		bne		@doneCardDetection
++
+
+	; Determine if this is a Mockingboard or Phasor card
 
 	lda		#$55
 	ldy		#SY6522_DDRB
@@ -344,8 +381,110 @@ DetectSubunits
 ++	lda		#PH_MOCKINGBOARD
 	jsr		SetPhasorMode
 
-@donePhasor
+@doneCardDetection
 
+	;
+
+;	jsr		DetectSSI263			; pre: zpTmp1
+;	jsr		DetectSC01				; pre: zpTmp1
+	jsr		DetectAY8913			; pre: zpTmp1
+
+	lda		hasAY8913
+	asl
+	asl
+	asl
+	asl
+	ldx		slotUnderTest
+	ora		slotInfo,x
+
+	ldy		isrNMIcount_A
+	beq		+
+		ora		#NMI_FOR_6522A
++
+
+	ldy		isrNMIcount_B
+	beq		+
+		ora		#NMI_FOR_6522B
++
+
+	sta		slotInfo,x				; slotInfo[slot] |= (hasAY8913 << 4)
+
+	;
+	; set slotInfo2
+	;
+
+	ldy		#CARDTYPE_SDMUSIC
+	lda		isSDMusic
+	bne		@setSlotInfo2
+
+	dey
+	lda		isMegaAudioCard
+	bne		@setSlotInfo2
+
+	dey
+	lda		isMB4C
+	bne		@setSlotInfo2
+
+	dey
+	lda		isEchoPlus
+	bne		@setSlotInfo2
+
+	dey
+	lda		isPhasorCard
+	bne		@setSlotInfo2
+
+	dey		; CARDTYPE_UNKNOWN
+
+@setSlotInfo2
+	tya
+	sta		slotInfo2,x
+
+	rts
+
+;------------------------------------------------------------------------------
+
+RestoreFromSlotInfo2
+; pre: X=slot#
+; post: isSDMusic, isMegaAudioCard, isMB4C, isEchoPlus, isPhasorCard
+
+	lda		#0
+	sta		isSDMusic
+	sta		isMegaAudioCard
+	sta		isMB4C
+	sta		isEchoPlus
+	sta		isPhasorCard
+
+	lda		slotInfo2,x
+	ldx		#1
+	and		#CARDTYPE_MASK
+	tay
+
+	beq		@done	; unknown
+	dey
+	beq		@phasor
+	dey
+	beq		@echoplus
+	dey
+	beq		@mb4c
+	dey
+	beq		@megaaudio
+	; fall through...
+
+@sdmusic
+	stx		isSDMusic
+	rts
+@megaaudio
+	stx		isMegaAudioCard
+	rts
+@mb4c
+	stx		isMB4C
+	rts
+@echoplus
+	stx		isEchoPlus
+	rts
+@phasor
+	stx		isPhasorCard
+@done
 	rts
 
 ;------------------------------------------------------------------------------
@@ -512,9 +651,12 @@ LINE4=TEXTLINE5
 SLOT1POS = $13					; pos left of '1'
 
 Display
+;(title)
+;(blank)
 ;               1  2  3  4  5  6  7
-;          $00: ?           C  P       ; ?=6522(VIA), C=MB-C(or MB-A or Sound-II), P=Phasor
-;          $80:    ?        C  P
+;          $00: ?     1  S  C  P       ; ?=6522(VIA), 1=Sound-I(or Speech-I), S=Sound/Speech-I, M=MegaAudio, M4C=MB4C, E=Echo+, C=MB-C(or MB-A or Sound-II), P=Phasor, SDM=SD Music (Deluxe)
+;          $80:    ?     S  C  P
+;(blank)
 
 	lda		#$80+'$'
 	sta		LINE2+$0f
@@ -528,6 +670,11 @@ Display
 	lda		#$80+':'
 	sta		LINE2+$12
 	sta		LINE3+$12
+;	sta		LINE4+$12
+;	lda		#$80+'S'
+;	sta		LINE4+$10
+;	lda		#$80+'P'
+;	sta		LINE4+$11
 
 	ldx		#7*3-1
 	ldy		#7
@@ -572,6 +719,30 @@ Display
 
 ;--------------------------------------
 
+DisplaySlotUpdate
+
+	ldx		#7*3-1
+	ldy		#7
+
+-		tya
+		cmp		slotUnderTest
+		bne		+
+			ora		#'0'
+			bne		++
+			;
++			ora		#$80+'0'
+++		sta		LINE1+$12,x		; '1  2  3  4  5  6  7'
+
+		dex
+		dex
+		dex
+		dey
+		bne		-
+
+	rts
+
+;--------------------------------------
+
 DisplayCardUpdate
 ; Pre: X=slot#
 
@@ -588,17 +759,72 @@ DisplayCardUpdate
 	adc		zpTmp1
 	tax
 
-	lda		#$80+' '
+	lda		isPhasorCard
+	beq		@mb
+
+		; ...
+
++		lda		#$80+' '
+		sta		zpTmp1			; x-1 pos: default: ' '
+		sta		zpTmp2			; x+1 pos: default: ' '
+		lda		#$80+'P'
+		bne		@out
+
+	;
+
+@mb	; ...
+
++	lda		#$80+' '
 	sta		zpTmp1			; x-1 pos: default: ' '
 	sta		zpTmp2			; x+1 pos: default: ' '
 
-		lda		isPhasorCard
-		beq		@isIIorC
-			lda		#$80+'P'
-			bne		@out
-@isIIorC	lda		#$80+'C'	; MB-C or MB-Sound II (has 2x 6522/AY8913, but no SC01 nor SSI263)
-@out:
+	lda		has6522
+	cmp		#%00000001			; only a 6522 at $00?
+	bne		+
+		lda		#$80+'1'		; MB-Sound I (has a 6522/AY8913 at $00) or MB-Speech I (has a 6522/SC01) at $00
 		sta		LINE2+SLOT1POS,x
+
++	lda		has6522
+	cmp		#%00000010			; only a 6522 at $80?
+	bne		+
+		lda		isSDMusic
+		bne		@sdm
+		lda		isEchoPlus
+		bne		@ep
+		lda		#$80+'?'		; don't know what this is!
+		sta		LINE3+SLOT1POS,x
+
++	lda		has6522
+	cmp		#%00000011			; 6522 at $00 && $80?
+	bcc		@speech				; (branch if A < 3)
+		lda		isMegaAudioCard
+		beq		+
+			lda		#$80+'M'
+			bne		@out
++		lda		isMB4C
+		beq		+
+			lda		#$80+'M'	; 'M4C'
+			sta		zpTmp1
+			lda		#$80+'C'
+			sta		zpTmp2
+			lda		#$80+'4'
+			bne		@out
++		lda		isEchoPlus
+		beq		+
+@ep			lda		#$80+'E'
+			bne		@out
++		lda		isSDMusic
+		beq		+
+@sdm		lda		#$80+'S'	; 'SDM'
+			sta		zpTmp1
+			lda		#$80+'M'
+			sta		zpTmp2
+			lda		#$80+'D'
+			bne		@out
++			lda		#$80+'C'	; MB-C or MB-Sound II (has 2x 6522/AY8913, but no SC01 nor SSI263)
+			bne		@out
+
+@out	sta		LINE2+SLOT1POS,x
 		sta		LINE3+SLOT1POS,x
 		lda		zpTmp1
 		sta		LINE2+SLOT1POS-1,x
@@ -607,6 +833,34 @@ DisplayCardUpdate
 		sta		LINE2+SLOT1POS+1,x
 		sta		LINE3+SLOT1POS+1,x
 
+	;
+	; Add info about any speech chips
+	;
+
+@speech
+!if 0 {
+	lda		hasSC01
+	beq		@SSI263
+		lda		#$80+'V'
+		sta		LINE4+SLOT1POS+1,x
+
+@SSI263
+	lda		hasSSI263			; bitmap
+	beq		@done
+		lsr
+		bcc		+
+			pha
+			lda		#$80+'A'	; $Cn40
+			sta		LINE4+SLOT1POS-1,x
+			pla
++		lsr
+		bcc		+
+			lda		#$80+'B'	; $Cn20
+			sta		LINE4+SLOT1POS,x
++
+}
+
+@done
 	rts
 
 ;------------------------------------------------------------------------------
@@ -730,8 +984,12 @@ Print
 
 COMPONENT_CARD		= $00
 COMPONENT_6522		= $10
+COMPONENT_AY8913	= $20
+;COMPONENT_SC01		= $30
+;COMPONENT_SSI263	= $40
 
 !source "chip-6522.a"
+!source "chip-ay8913.a"
 
 ;------------------------------------------------------------------------------
 
@@ -749,7 +1007,19 @@ HAS_6522B		= %00000010	;   b1:    6522 at $80
 HAS_6522A		= %00000001	;   b0:    6522 at $00
 slotInfo		!fill 8,0	; slot[0..7]
 
+; slotInfo2 bitfield:
+CARDTYPE_MASK		= %00001111
+CARDTYPE_SDMUSIC	= 5
+CARDTYPE_MEGAAUDIO	= 4
+CARDTYPE_MB4C		= 3
+CARDTYPE_ECHOPLUS	= 2
+CARDTYPE_PHASOR		= 1
+CARDTYPE_UNKNOWN	= 0
+slotInfo2		!fill 8,0	; slot[0..7]
+
 numMockingboards	!byte 0
+;numMockingboardsForMCT	!byte 0		; num of Mockingboards for multi-card tests: need 2x 6522 per card
+numMegaAudioCards		!byte 0
 
 is65C02			!byte 0
 is65816			!byte 0
@@ -762,11 +1032,18 @@ testNum			!byte 0
 subTestNum		!byte 0
 totalTests		!byte 0,0
 
+isSDMusic		!byte 0
+isMegaAudioCard	!byte 0
+isMB4C			!byte 0
+isEchoPlus		!byte 0
 isPhasorCard	!byte 0
 phasorMode		!byte PH_MOCKINGBOARD
 
 has6522			!byte 0
 hasLowerCase	!byte 0
+hasAY8913		!byte 0
+hasSSI263		!byte 0
+hasSC01			!byte 0
 
 isrIFR_A		!byte 0
 isrIFR_B		!byte 0
@@ -779,6 +1056,7 @@ isrCopyA		!byte 0
 isrNMIcount		!byte 0
 isrNMIcount_A	!byte 0
 isrNMIcount_B	!byte 0
+;isrNMIcount_SC01	!byte 0
 
 saveZPTextVars	!fill (BAS2H-CH)+1,0
 
@@ -799,7 +1077,8 @@ userlandSP		!byte 0
 test1FailuresA	!word 0		; little-endian
 test1FailuresB	!word 0		; little-endian
 
-msg_mbaudit	!text "phasor-1 v0.2, Tom Charlesworth, 2022",0xd
+;                  0123456789012345678901234567890123456789
+msg_mbaudit	!text "phasor-1 v0.3, Tom Charlesworth,2022-24",0xd
 msg_mbauditEnd !text 0
 
 msg_cpu6502Detected !text "6502 detected",0xd
